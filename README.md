@@ -229,11 +229,3 @@ Javlin is my reminder that **code can be expressive, readable, and fun** — eve
 
 ---
 
-## 🏷️ Tags
-
-`#Python` `#ToyLanguage` `#BhailangInspired` `#Interpreter` `#LearningByDoing` `#WeekendProject` `#OpenSource`
-
----
-
-Would you like me to include a **“💬 Custom Syntax Reference”** section next — listing all commands (`take`, `speak`, `maths`, `for`, `do:`, etc.) with short syntax + example pairs, like an official language doc page?
-It’ll make your README feel like *real developer documentation*.
