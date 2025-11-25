@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Javlin — Toy Language 2.1 (Web REPL)</title>
+<style>
+    body {
+        background: #111;
+        color: #eee;
+        font-family: Consolas, monospace;
+        margin: 0;
+        padding: 20px;
+    }
+    #output {
+        width: 100%;
+        height: 350px;
+        background: #000;
+        border: 1px solid #444;
+        padding: 10px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+    }
+    #input {
+        width: 100%;
+        padding: 10px;
+        font-family: Consolas, monospace;
+        background: #000;
+        color: #0f0;
+        border: 1px solid #444;
+        margin-top: 10px;
+    }
+    button {
+        margin-top: 10px;
+        padding: 10px 16px;
+        background: #333;
+        color: #fff;
+        border: 1px solid #555;
+        cursor: pointer;
+    }
+    button:hover {
+        background: #444;
+    }
+</style>
+</head>
+<body>
+
+<h2>Javlin — Toy Language 2.1 (Browser REPL)</h2>
+
+<div id="output">Loading Pyodide…</div>
+<input id="input" placeholder="Enter Javlin code here">
+<button onclick="runJavlin()">Run</button>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.24.0/full/pyodide.js"></script>
+
+<script>
+let pyodideReady = false;
+
+async function setup() {
+    let pyodide = await loadPyodide();
+    window.pyodide = pyodide;
+
+    await pyodide.runPythonAsync(`
+import re
+import ast
+from typing import List, Union, Any, Dict, Optional, Tuple
+from js import document
+
+output_el = document.getElementById("output")
+def println(x):
+    output_el.innerHTML += str(x) + "\\n"
+    output_el.scrollTop = output_el.scrollHeight
+
+# ============================================================
+# ============= YOUR FULL INTERPRETER BEGINS ==================
+# ============================================================
+
+class JavlinError(Exception):
+    pass
+class LexerError(JavlinError): pass
+class ParserError(JavlinError): pass
+class RuntimeError(JavlinError): pass
+
+Token = Tuple[str, str]
+
+TOKEN_SPEC = [
+    ("NUMBER",    r"\\d+(\\.\\d+)?"),
+    ("STRING",    r"(?P<quote>['\\\"])(?:\\\\.|(?!\\1).)*\\1"),
+    ("NAME",      r"[A-Za-z_][A-Za-z0-9_]*"),
+    ("OP",        r"==|!=|<=|>=|\\+|\\-|\\*|\\/|%|<|>"),
+    ("ASSIGN",    r"="),
+    ("COLON",     r":"),
+    ("COMMA",     r","),
+    ("LPAREN",    r"\\("),
+    ("RPAREN",    r"\\)"),
+    ("SEMICOLON", r";"),
+    ("NEWLINE",   r"\\n"),
+    ("SKIP",      r"[ \\t]+"),
+    ("MISMATCH",  r"."),
+]
+
+TOK_REGEX = "|".join("(?P<%s>%s)" % pair for pair in TOKEN_SPEC)
+TOKEN_RE = re.compile(TOK_REGEX, re.DOTALL)
+
+KEYWORDS = {
+    "take", "speak", "maths", "if", "else",
+    "for", "in", "range", "do", "while", "exit", "quit"
+}
+
+def lex(code: str) -> List[Token]:
+    tokens = []
+    pos = 0
+    while pos < len(code):
+        m = TOKEN_RE.match(code, pos)
+        if not m:
+            raise LexerError("Unexpected character")
+        kind = m.lastgroup
+        value = m.group(kind)
+        pos = m.end()
+        if kind == "NUMBER":
+            tokens.append((kind, value))
+        elif kind == "STRING":
+            inner = value[1:-1]
+            inner = inner.encode("utf-8").decode("unicode_escape")
+            tokens.append(("STRING", inner))
+        elif kind == "NAME":
+            if value in KEYWORDS:
+                tokens.append((value.upper(), value))
+            else:
+                tokens.append(("NAME", value))
+        elif kind in ("OP","ASSIGN","COLON","COMMA","LPAREN","RPAREN","SEMICOLON"):
+            tokens.append((kind, value))
+        elif kind == "NEWLINE":
+            tokens.append(("SEMICOLON",";"))
+        elif kind == "SKIP":
+            pass
+        elif kind == "MISMATCH":
+            raise LexerError("Bad token")
+    return tokens
+
+# AST nodes
+class Node: pass
+class Expr(Node): pass
+class Number(Expr):
+    def __init__(self,v): self.value=v
+class String(Expr):
+    def __init__(self,v): self.value=v
+class Var(Expr):
+    def __init__(self,n): self.name=n
+class BinOpExpr(Expr):
+    def __init__(self,l,op,r): self.left=l; self.op=op; self.right=r
+class CallExpr(Expr):
+    def __init__(self,f,a): self.func_name=f; self.args=a
+
+class Stmt(Node): pass
+class TakeStmt(Stmt):
+    def __init__(self,n,e): self.name=n; self.expr=e
+class SpeakStmt(Stmt):
+    def __init__(self,e): self.expr=e
+class MathsExprStmt(Stmt):
+    def __init__(self,e): self.expr=e
+class MathsAssignStmt(Stmt):
+    def __init__(self,n,e): self.name=n; self.expr=e
+class IfElseStmt(Stmt):
+    def __init__(self,c,t,e=None): self.condition=c; self.then_stmt=t; self.else_stmt=e
+class ForStmt(Stmt):
+    def __init__(self,v,s,e,b): self.var=v; self.start=s; self.end=e; self.body=b
+class DoWhileStmt(Stmt):
+    def __init__(self,b,c): self.body=b; self.condition=c
+class BlockStmt(Stmt):
+    def __init__(self,ss): self.statements=ss
+class NoOp(Stmt): pass
+
+# Parser
+class Parser:
+    def __init__(self,tokens):
+        self.tokens=tokens; self.pos=0
+    def _peek(self):
+        return self.tokens[self.pos] if self.pos<len(self.tokens) else None
+    def _next(self):
+        tok=self._peek(); 
+        if tok: self.pos+=1
+        return tok
+    def _expect(self,t):
+        tok=self._next()
+        if not tok or tok[0]!=t:
+            raise ParserError(f"Expected {t}")
+        return tok
+    def parse(self):
+        out=[]
+        while self.pos<len(self.tokens):
+            s=self.parse_statement()
+            if not isinstance(s,NoOp): out.append(s)
+        return BlockStmt(out)
+    def parse_statement(self):
+        tok=self._peek()
+        if not tok: return NoOp()
+        t=tok[0]
+        if t=="SEMICOLON": self._next(); return NoOp()
+        if t=="TAKE": return self.parse_take()
+        if t=="SPEAK": return self.parse_speak()
+        if t=="MATHS": return self.parse_maths()
+        if t=="IF": return self.parse_if()
+        if t=="FOR": return self.parse_for()
+        if t=="DO": return self.parse_do()
+        if t in ("EXIT","QUIT"): self._next(); return TakeStmt("__JAVLIN_EXIT__",Number(1))
+        e=self.parse_expr()
+        if self._peek() and self._peek()[0]=="SEMICOLON": self._next()
+        return MathsExprStmt(e)
+    def parse_take(self):
+        self._expect("TAKE")
+        name=self._expect("NAME")[1]
+        self._expect("ASSIGN")
+        e=self.parse_expr()
+        if self._peek() and self._peek()[0]=="SEMICOLON": self._next()
+        return TakeStmt(name,e)
+    def parse_speak(self):
+        self._expect("SPEAK")
+        tok=self._peek()
+        if tok and tok[0]=="STRING":
+            self._next()
+            e=String(tok[1])
+        else:
+            e=self.parse_expr()
+        if self._peek() and self._peek()[0]=="SEMICOLON": self._next()
+        return SpeakStmt(e)
+    def parse_maths(self):
+        self._expect("MATHS")
+        nxt=self._peek()
+        if nxt and nxt[0]=="NAME":
+            if self.pos+1<len(self.tokens) and self.tokens[self.pos+1][0]=="ASSIGN":
+                name=self._next()[1]
+                self._expect("ASSIGN")
+                e=self.parse_expr()
+                if self._peek() and self._peek()[0]=="SEMICOLON": self._next()
+                return MathsAssignStmt(name,e)
+        e=self.parse_expr()
+        if self._peek() and self._peek()[0]=="SEMICOLON": self._next()
+        return MathsExprStmt(e)
+    def parse_if(self):
+        self._expect("IF")
+        cond=self.parse_expr()
+        self._expect("COLON")
+        then=self.parse_statement()
+        els=None
+        if self._peek() and self._peek()[0]=="ELSE":
+            self._next()
+            self._expect("COLON")
+            els=self.parse_statement()
+        return IfElseStmt(cond,then,els)
+    def parse_for(self):
+        self._expect("FOR")
+        var=self._expect("NAME")[1]
+        self._expect("IN")
+        fn=self._expect("NAME")[1]
+        if fn!="range": raise ParserError("Only range() allowed")
+        self._expect("LPAREN")
+        s=self.parse_expr()
+        self._expect("COMMA")
+        e=self.parse_expr()
+        self._expect("RPAREN")
+        self._expect("COLON")
+        body=self.parse_statement()
+        return ForStmt(var,s,e,body)
+    def parse_do(self):
+        self._expect("DO")
+        self._expect("COLON")
+        body=[]
+        while True:
+            if self._peek() is None: raise ParserError("Unexpected EOF in do-while")
+            if self._peek()[0]=="WHILE": break
+            st=self.parse_statement()
+            if not isinstance(st,NoOp): body.append(st)
+        body = body[0] if len(body)==1 else BlockStmt(body)
+        self._expect("WHILE")
+        cond=self.parse_expr()
+        if self._peek() and self._peek()[0]=="SEMICOLON": self._next()
+        return DoWhileStmt(body,cond)
+
+    def parse_expr(self):
+        tokens=[]
+        d=0
+        while self.pos<len(self.tokens):
+            t,v=self.tokens[self.pos]
+            if t=="LPAREN": d+=1
+            elif t=="RPAREN":
+                if d==0: break
+                d-=1
+            if d==0 and t in ("SEMICOLON","COLON","COMMA"): break
+            if t=="ASSIGN" and d==0: break
+            tokens.append(self._next())
+        text=self._expr_text(tokens)
+        if not text.strip(): raise ParserError("Empty expression")
+        return compile_expr(text)
+    def _expr_text(self,toks):
+        out=[]
+        for t,v in toks:
+            if t=="STRING": out.append(repr(v))
+            else: out.append(v)
+        return " ".join(out)
+
+# Safe expression compiler
+ALLOWED_AST_NODES = {
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant, ast.Name, ast.Load,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow, ast.USub, ast.UAdd,
+    ast.Call, ast.Tuple, ast.List, ast.Compare, ast.Eq, ast.NotEq, ast.Lt, ast.LtE,
+    ast.Gt, ast.GtE, ast.BoolOp, ast.And, ast.Or,
+}
+
+ALLOWED_CALLS = {"range"}
+
+def _check_ast(n):
+    for c in ast.walk(n):
+        if type(c) not in ALLOWED_AST_NODES:
+            raise ValueError("bad AST node")
+        if isinstance(c,ast.Call):
+            if not isinstance(c.func,ast.Name) or c.func.id not in ALLOWED_CALLS:
+                raise ValueError("bad call")
+
+def compile_expr(text):
+    t=ast.parse(text,mode="eval")
+    _check_ast(t)
+    return _conv(t.body)
+
+def _conv(n):
+    if isinstance(n,ast.Constant):
+        v=n.value
+        if isinstance(v,(int,float)): return Number(v)
+        if isinstance(v,str): return String(v)
+    if isinstance(n,ast.Name):
+        return Var(n.id)
+    if isinstance(n,ast.BinOp):
+        return BinOpExpr(_conv(n.left), _op(n.op), _conv(n.right))
+    if isinstance(n,ast.UnaryOp):
+        if isinstance(n.op,ast.USub):
+            return BinOpExpr(Number(0),"-",_conv(n.operand))
+        return _conv(n.operand)
+    if isinstance(n,ast.Compare):
+        return BinOpExpr(_conv(n.left), _cmp(n.ops[0]), _conv(n.comparators[0]))
+    if isinstance(n,ast.BoolOp):
+        op="and" if isinstance(n.op,ast.And) else "or"
+        vals=[_conv(v) for v in n.values]
+        e=vals[0]
+        for v in vals[1:]:
+            e=BinOpExpr(e,op,v)
+        return e
+    if isinstance(n,ast.Call):
+        return CallExpr(n.func.id, [_conv(a) for a in n.args])
+    raise ValueError("bad expr")
+
+def _op(o):
+    return {
+        ast.Add:"+", ast.Sub:"-", ast.Mult:"*", ast.Div:"/", ast.Mod:"%", ast.Pow:"**"
+    }[type(o)]
+
+def _cmp(o):
+    return {
+        ast.Eq:"==", ast.NotEq:"!=", ast.Lt:"<", ast.LtE:"<=", ast.Gt:">", ast.GtE:">="
+    }[type(o)]
+
+# Interpreter
+class Interpreter:
+    def __init__(self):
+        self.env={}
+    def eval_expr(self,e):
+        if isinstance(e,Number): return e.value
+        if isinstance(e,String): return e.value
+        if isinstance(e,Var):
+            if e.name in self.env: return self.env[e.name]
+            raise RuntimeError("Undefined variable")
+        if isinstance(e,BinOpExpr):
+            l=self.eval_expr(e.left)
+            r=self.eval_expr(e.right)
+            op=e.op
+            if op=="and": return bool(l) and bool(r)
+            if op=="or": return bool(l) or bool(r)
+            return eval(f"l {op} r")
+        if isinstance(e,CallExpr):
+            if e.func_name=="range":
+                args=[int(self.eval_expr(a)) for a in e.args]
+                return list(range(*args))
+            raise RuntimeError("bad function")
+        raise RuntimeError("bad expr")
+    def exec_stmt(self,st):
+        if isinstance(st,BlockStmt):
+            for s in st.statements: self.exec_stmt(s)
+        elif isinstance(st,TakeStmt):
+            self.env[st.name]=self.eval_expr(st.expr)
+        elif isinstance(st,SpeakStmt):
+            println(self.eval_expr(st.expr))
+        elif isinstance(st,MathsAssignStmt):
+            v=self.eval_expr(st.expr)
+            self.env[st.name]=v
+            self.env["_"]=v
+            println(f"[maths] {st.name} = {v}")
+        elif isinstance(st,MathsExprStmt):
+            v=self.eval_expr(st.expr)
+            self.env["_"]=v
+            println(f"[maths] Result = {v}")
+        elif isinstance(st,IfElseStmt):
+            if self.eval_expr(st.condition): self.exec_stmt(st.then_stmt)
+            elif st.else_stmt: self.exec_stmt(st.else_stmt)
+        elif isinstance(st,ForStmt):
+            s=self.eval_expr(st.start); e=self.eval_expr(st.end)
+            for i in range(int(s),int(e)):
+                self.env[st.var]=i
+                self.exec_stmt(st.body)
+            self.env.pop(st.var,None)
+        elif isinstance(st,DoWhileStmt):
+            while True:
+                self.exec_stmt(st.body)
+                if not self.eval_expr(st.condition): break
+        elif isinstance(st,NoOp):
+            pass
+        else:
+            raise RuntimeError("bad stmt")
+
+def run_code(src,interp):
+    tokens=lex(src)
+    astroot=Parser(tokens).parse()
+    for s in astroot.statements:
+        if isinstance(s,TakeStmt) and s.name=="__JAVLIN_EXIT__":
+            println("Exiting Javlin...")
+            return
+        interp.exec_stmt(s)
+
+interpreter = Interpreter()
+
+# ============================================================
+# ================ YOUR FULL INTERPRETER ENDS =================
+# ============================================================
+    `);
+
+    document.getElementById("output").innerText = "Javlin ready.\nType code and press Run.";
+    pyodideReady = true;
+}
+
+setup();
+
+async function runJavlin() {
+    if (!pyodideReady) return;
+    let code = document.getElementById("input").value;
+    document.getElementById("input").value = "";
+
+    try {
+        await pyodide.runPythonAsync(`
+try:
+    run_code("""${code.replace(/`/g,"\\`")}""", interpreter)
+except Exception as e:
+    println("[Error] " + str(e))
+`);
+    } catch (e) {
+        document.getElementById("output").innerHTML += "[JS Error] " + e + "\\n";
+    }
+}
+</script>
+
+</body>
+</html>
