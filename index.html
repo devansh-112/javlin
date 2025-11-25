@@ -45,6 +45,41 @@
 <body>
 
 <h2>Javlin — Toy Language 2.1 (Browser REPL)</h2>
+<div id="help" style="
+    background:#1a1a1a;
+    border:1px solid #333;
+    padding:15px;
+    margin-bottom:15px;
+    font-size:14px;
+    line-height:1.5;
+">
+    <b>Javlin Basic Commands</b><br><br>
+
+    <b>Variable</b><br>
+    <code>take x = 10</code> – create/set a variable<br>
+    <code>take msg = "hello"</code><br><br>
+
+    <b>Output</b><br>
+    <code>speak "text"</code><br>
+    <code>speak x + 3</code><br><br>
+
+    <b>Math Operations</b><br>
+    <code>maths result = 5 * 2</code><br>
+    <code>maths x + y</code> – evaluates expression<br><br>
+
+    <b>If / Else</b><br>
+    <code>if x > 5: speak "big"; else: speak "small"</code><br><br>
+
+    <b>For Loop</b><br>
+    <code>for i in range(0,5): speak i</code><br><br>
+
+    <b>Do / While</b><br>
+    <code>do: speak "hi" while x < 3</code><br><br>
+
+    <b>Exit</b><br>
+    <code>exit</code> or <code>quit</code><br>
+</div>
+
 
 <div id="output">Loading Pyodide…</div>
 <input id="input" placeholder="Enter Javlin code here">
